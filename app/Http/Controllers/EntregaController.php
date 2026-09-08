@@ -360,9 +360,10 @@ class EntregaController extends Controller
                 });
         }
 
-        // So se prepara o que tem rota atribuida e nao foi dado como nao
-        // entregue (pedido do Andre, 28/08/2026). O filtro pode ser desligado
-        // com ?mostrar_tudo=1, para nao esconder trabalho sem querer.
+        // Das EMPRESAS so se prepara o que tem rota atribuida e nao foi dado
+        // como nao entregue (pedido do Andre, 28/08/2026). Os clientes B2C
+        // aparecem sempre; deles so se escondem os nao entregues. O filtro pode
+        // ser desligado com ?mostrar_tudo=1, para nao esconder trabalho.
         $mostrarTudo = $request->boolean('mostrar_tudo');
 
         $atribuicoes = AtribuicaoEntrega::query()
@@ -372,11 +373,6 @@ class EntregaController extends Controller
         $temColaboradorCorporate = $atribuicoes
             ->where('tipo', 'corporate')
             ->map(fn (AtribuicaoEntrega $a): string => $a->corporate_id.'|'.$a->dia_semana)
-            ->flip();
-
-        $temColaboradorB2c = $atribuicoes
-            ->where('tipo', 'b2c')
-            ->map(fn (AtribuicaoEntrega $a): string => $a->woo_order_id.'|'.$a->dia_semana)
             ->flip();
 
         $escondidasSemColaborador = 0;
@@ -421,9 +417,11 @@ class EntregaController extends Controller
 
             $escondidasSemColaborador += max(0, $antesCorporate - $corporatePreparacoes->count() - $escondidasNaoEntregues);
 
-            $antesB2c = $b2cPreparacoes->count();
             $naoEntreguesB2c = 0;
 
+            // Os clientes B2C aparecem SEMPRE, tenham ou nao colaborador
+            // atribuido (pedido do Andre, 01/09/2026) — so se escondem as
+            // entregas dadas como nao entregues.
             $b2cPreparacoes = $b2cPreparacoes
                 ->reject(function (array $preparacao) use (&$naoEntreguesB2c, $falhadasB2c): bool {
                     if ($falhadasB2c->has($preparacao['order']->id.'|'.$preparacao['data'])) {
@@ -434,11 +432,9 @@ class EntregaController extends Controller
 
                     return false;
                 })
-                ->filter(fn (array $preparacao): bool => $temColaboradorB2c->has($preparacao['order']->id.'|'.$preparacao['dia']))
                 ->values();
 
             $escondidasNaoEntregues += $naoEntreguesB2c;
-            $escondidasSemColaborador += max(0, $antesB2c - $b2cPreparacoes->count() - $naoEntreguesB2c);
         }
 
         $corporatePreparacoes->each(function (array $preparacao): void {

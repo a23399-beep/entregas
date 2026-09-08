@@ -96,6 +96,7 @@ Route::middleware('auth')->group(function (): void {
         Route::get('/despesas/pdf', [DespesaController::class, 'exportarPdf'])->name('despesas.pdf');
         Route::get('/despesas/csv', [DespesaController::class, 'exportarCsv'])->name('despesas.csv');
         Route::get('/despesas/create', [DespesaController::class, 'create'])->name('despesas.create');
+        Route::post('/despesas/extrair-ia', [DespesaController::class, 'extrairIa'])->name('despesas.extrair-ia');
         Route::post('/despesas', [DespesaController::class, 'store'])->name('despesas.store');
         Route::get('/despesas/{despesa}/edit', [DespesaController::class, 'edit'])->name('despesas.edit');
         Route::patch('/despesas/{despesa}', [DespesaController::class, 'update'])->name('despesas.update');

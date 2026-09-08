@@ -17,14 +17,20 @@
 
     {{-- Upload de ficheiro / foto --}}
     <div class="mb-5">
-        <label class="text-sm text-slate-300">Foto ou scan da fatura
-            <div class="mt-1">
-                <input type="file" name="ficheiro" id="ficheiro-input" accept="image/*,application/pdf"
-                    class="w-full rounded border border-white/10 bg-[#0A0F1A] px-3 py-2 text-sm text-slate-200 file:mr-3 file:rounded file:border-0 file:bg-emerald-500/20 file:px-3 file:py-1 file:text-xs file:font-semibold file:text-emerald-300">
-            </div>
-            <p class="mt-1 text-xs text-slate-500">Em telemovel, escolha a camara neste campo. Ao guardar uma imagem, a IA local recebe um job automaticamente.</p>
-            <p id="ficheiro-status" class="mt-2 hidden rounded border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200"></p>
-        </label>
+        <label for="ficheiro-input" class="block text-sm text-slate-300">Foto ou scan da fatura</label>
+        <input type="file" name="ficheiro" id="ficheiro-input" accept="image/*,application/pdf"
+            class="mt-1 w-full rounded border border-white/10 bg-[#0A0F1A] px-3 py-2 text-sm text-slate-200 file:mr-3 file:rounded file:border-0 file:bg-emerald-500/20 file:px-3 file:py-1 file:text-xs file:font-semibold file:text-emerald-300">
+
+        <div class="mt-2 flex flex-wrap gap-2">
+            <button type="button" id="btn-extrair-ia"
+                class="rounded bg-blue-500 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-600 disabled:opacity-60">
+                Ler fatura com IA
+            </button>
+        </div>
+
+        <p class="mt-1 text-xs text-slate-500">No telemovel, escolha a camara neste campo. Depois carregue em "Ler fatura com IA" para preencher as linhas. Se guardar sem o fazer, a leitura corre no servidor e o guardar pode demorar ate meio minuto.</p>
+        <p id="ficheiro-status" class="mt-2 hidden rounded border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200"></p>
+
         @if($despesa->exists && $despesa->ficheiro_path)
             <p class="mt-1 text-xs text-slate-500">Ficheiro atual: <a href="{{ Storage::disk('public')->url($despesa->ficheiro_path) }}" target="_blank" class="text-blue-400 hover:underline">ver ficheiro</a> (substituir acima para mudar)</p>
         @endif
@@ -69,7 +75,7 @@
             + Adicionar linha
         </button>
     </div>
-    <p class="mb-3 text-xs text-slate-500">O QR da AT nao traz produtos. Registe as linhas da fatura e use a conversao para unidades para obter logo o custo unitario usado nas margens.</p>
+    <p class="mb-3 text-xs text-slate-500">O QR da AT nao traz produtos. Use a leitura por IA ou registe as linhas a mao; a conversao para unidades da logo o custo unitario usado nas margens.</p>
 
     <div id="items-container" class="space-y-3">
         {{-- Template vazio (oculto) --}}
@@ -153,264 +159,191 @@
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
 <script>
 (function () {
-    var qrData = null;
-    var maxQrSide = 1800;
-    var maxUploadSide = 1800;
-    var jpegQuality = 0.82;
-    var compressibleTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+    'use strict';
 
-    // -- QR Scanner --
-    function tryDecodeQr(file) {
-        if (typeof jsQR === 'undefined') {
-            return;
-        }
+    var MAX_UPLOAD_SIDE = 1800;
+    var MAX_QR_SIDE = 1800;
+    var MAX_IA_SIDE = 1600;
+    var JPEG_QUALITY = 0.82;
+    var COMPRESSIVEIS = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+    var ESPERA_MAX_SUBMIT = 6000;
 
-        var reader = new FileReader();
-        reader.onload = function (e) {
-            var img = new Image();
-            img.onload = function () {
-                var scale = Math.min(1, maxQrSide / Math.max(img.width, img.height));
-                var canvas = document.createElement('canvas');
-                canvas.width = Math.max(1, Math.round(img.width * scale));
-                canvas.height = Math.max(1, Math.round(img.height * scale));
-                var ctx = canvas.getContext('2d');
-                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-                var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                var code = jsQR(imageData.data, imageData.width, imageData.height);
-                if (code && code.data && code.data.startsWith('A:')) {
-                    qrData = parseAtQr(code.data);
-                    preencherComQr(qrData);
-                    document.getElementById('qr-banner').classList.remove('hidden');
-                    var status = document.getElementById('ficheiro-status');
-                    if (status) {
-                        status.textContent = 'QR AT detetado e campos preenchidos. Reveja os dados e guarde a entrada.';
-                    }
-                } else {
-                    var status = document.getElementById('ficheiro-status');
-                    if (status) {
-                        status.textContent = 'Foto preparada. Nao consegui ler o QR automaticamente; pode preencher os campos manualmente e guardar.';
-                        status.classList.remove('hidden');
-                    }
-                }
-            };
-            img.onerror = function () {
-                var status = document.getElementById('ficheiro-status');
-                if (status) {
-                    status.textContent = 'Foto selecionada. Nao consegui preparar a leitura do QR, mas pode guardar a entrada.';
-                    status.classList.remove('hidden');
-                }
-            };
-            img.src = e.target.result;
-        };
-        reader.readAsDataURL(file);
+    var fileInput = document.getElementById('ficheiro-input');
+    var statusEl = document.getElementById('ficheiro-status');
+    var qrBanner = document.getElementById('qr-banner');
+    var btnIa = document.getElementById('btn-extrair-ia');
+    var itemsContainer = document.getElementById('items-container');
+    var template = document.getElementById('item-template');
+    var totaisContainer = document.getElementById('totais-container');
+    var valorManualContainer = document.getElementById('valor-manual-container');
+    var form = fileInput ? fileInput.closest('form') : null;
+
+    var preparacao = null;        // promessa da preparacao da foto (ou null)
+    var preparacaoPendente = false;
+    var aEnviar = false;
+    var idx = 0;
+
+    // ---------------------------------------------------------------- helpers
+
+    function mostrarStatus(texto) {
+        if (!statusEl) return;
+        statusEl.textContent = texto;
+        statusEl.classList.remove('hidden');
     }
 
-    function parseAtQr(raw) {
-        var parts = raw.split('*');
-        var map = {};
-        parts.forEach(function (part) {
-            var idx = part.indexOf(':');
-            if (idx !== -1) {
-                map[part.substring(0, idx)] = part.substring(idx + 1);
+    function esconderStatus() {
+        if (!statusEl) return;
+        statusEl.textContent = '';
+        statusEl.classList.add('hidden');
+    }
+
+    function ficheiroAtual() {
+        return fileInput && fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+    }
+
+    function substituirFicheiro(novo) {
+        if (!novo || !fileInput || typeof DataTransfer === 'undefined') return;
+        try {
+            var dt = new DataTransfer();
+            dt.items.add(novo);
+            fileInput.files = dt.files;
+        } catch (e) {
+            // se o browser nao deixar, fica o ficheiro original
+        }
+    }
+
+    // Reduz a imagem para nao rebentar com o upload. Resolve sempre — em caso
+    // de erro devolve o ficheiro original em vez de ficar pendurada.
+    function reduzirImagem(file, maxSide) {
+        return new Promise(function (resolve) {
+            if (!file || COMPRESSIVEIS.indexOf(file.type) === -1) {
+                resolve(file);
+                return;
             }
+
+            var terminou = false;
+            function acabar(resultado) {
+                if (terminou) return;
+                terminou = true;
+                resolve(resultado || file);
+            }
+
+            // rede de seguranca: em telemoveis mais fracos o canvas pode nunca
+            // devolver nada. Ao fim de 8s seguimos com o ficheiro original.
+            setTimeout(function () { acabar(file); }, 8000);
+
+            try {
+                var reader = new FileReader();
+                reader.onerror = function () { acabar(file); };
+                reader.onload = function (event) {
+                    var img = new Image();
+                    img.onerror = function () { acabar(file); };
+                    img.onload = function () {
+                        try {
+                            var escala = Math.min(1, maxSide / Math.max(img.width, img.height));
+                            var canvas = document.createElement('canvas');
+                            canvas.width = Math.max(1, Math.round(img.width * escala));
+                            canvas.height = Math.max(1, Math.round(img.height * escala));
+                            canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+                            canvas.toBlob(function (blob) {
+                                if (!blob || blob.size >= file.size) {
+                                    acabar(file);
+                                    return;
+                                }
+                                acabar(new File([blob], file.name.replace(/\.(png|webp|jpeg)$/i, '.jpg'), {
+                                    type: 'image/jpeg',
+                                    lastModified: Date.now()
+                                }));
+                            }, 'image/jpeg', JPEG_QUALITY);
+                        } catch (e) {
+                            acabar(file);
+                        }
+                    };
+                    img.src = event.target.result;
+                };
+                reader.readAsDataURL(file);
+            } catch (e) {
+                acabar(file);
+            }
+        });
+    }
+
+    // ------------------------------------------------------------- QR da AT
+
+    function parseAtQr(raw) {
+        var map = {};
+        raw.split('*').forEach(function (part) {
+            var i = part.indexOf(':');
+            if (i !== -1) map[part.substring(0, i)] = part.substring(i + 1);
         });
         return map;
     }
 
+    function normalizarNumero(valor) {
+        return String(valor === null || valor === undefined ? '' : valor).trim().replace(',', '.');
+    }
+
     function preencherComQr(data) {
-        // G = numero documento (ex: FT A/123) — usa como título se vazio
         var titulo = document.getElementById('campo-titulo');
-        if (titulo && !titulo.value && data['G']) {
-            titulo.value = 'Fatura ' + data['G'];
-        }
-        // A = NIF do emitente
+        if (titulo && !titulo.value && data['G']) titulo.value = 'Fatura ' + data['G'];
+
         if (data['A']) {
             var fornecedor = document.getElementById('campo-fornecedor');
             if (fornecedor) fornecedor.value = data['A'];
         }
-        // F = data YYYYMMDD → YYYY-MM-DD
         if (data['F'] && data['F'].length === 8) {
-            var dataField = document.getElementById('campo-data');
-            if (dataField) {
-                dataField.value = data['F'].substring(0, 4) + '-' + data['F'].substring(4, 6) + '-' + data['F'].substring(6, 8);
-            }
+            var campoData = document.getElementById('campo-data');
+            if (campoData) campoData.value = data['F'].substring(0, 4) + '-' + data['F'].substring(4, 6) + '-' + data['F'].substring(6, 8);
         }
-        // G = numero da fatura
         if (data['G']) {
             var numFat = document.getElementById('campo-numero-fatura');
             if (numFat) numFat.value = data['G'];
         }
-        // O = total com IVA
         if (data['O']) {
             var campoValor = document.getElementById('campo-valor');
-            if (campoValor) campoValor.value = normalizarNumeroQr(data['O']);
+            if (campoValor) campoValor.value = normalizarNumero(data['O']);
         }
-        // H = ATCUD (mostra nas notas se existir)
         if (data['H']) {
             var notas = document.querySelector('textarea[name="notas"]');
             if (notas && !notas.value) notas.value = 'ATCUD: ' + data['H'];
         }
     }
 
-    function normalizarNumeroQr(valor) {
-        return String(valor || '').trim().replace(',', '.');
-    }
+    function lerQr(file) {
+        if (typeof jsQR === 'undefined' || !file || !file.type || file.type.indexOf('image/') !== 0) return;
 
-    var ficheiroInput = document.getElementById('ficheiro-input');
-    if (ficheiroInput) {
-        ficheiroInput.addEventListener('change', function () {
-            document.getElementById('qr-banner').classList.add('hidden');
-            qrData = null;
-            var status = document.getElementById('ficheiro-status');
-
-            if (status) {
-                status.classList.remove('hidden');
-                status.textContent = 'A preparar ficheiro...';
-            }
-
-            if (!this.files || !this.files[0]) {
-                if (status) {
-                    status.classList.add('hidden');
-                    status.textContent = '';
-                }
-                return;
-            }
-
-            var input = this;
-            var file = input.files[0];
-
-            prepareInvoiceImage(file).then(function (preparedFile) {
-                if (preparedFile !== file && typeof DataTransfer !== 'undefined') {
-                    var dataTransfer = new DataTransfer();
-                    dataTransfer.items.add(preparedFile);
-                    input.files = dataTransfer.files;
-                }
-
-                if (status) {
-                    status.textContent = preparedFile.type.startsWith('image/')
-                        ? 'Foto preparada. A tentar ler o QR AT...'
-                        : 'Ficheiro selecionado. Ao guardar, fica anexado a esta entrada.';
-                    status.classList.remove('hidden');
-                }
-
-                if (preparedFile.type.startsWith('image/')) {
-                    tryDecodeQr(preparedFile);
-                }
-            }).catch(function () {
-                if (status) {
-                    status.textContent = 'Ficheiro selecionado. Se o upload falhar, tente uma foto mais leve.';
-                    status.classList.remove('hidden');
-                }
-                if (file.type.startsWith('image/')) {
-                    tryDecodeQr(file);
-                }
-            });
-        });
-
-        var form = ficheiroInput.closest('form');
-        if (form) {
-            form.addEventListener('submit', function (event) {
-                if (form.dataset.ficheiroPrepared === '1') {
-                    return;
-                }
-
-                if (!ficheiroInput.files || !ficheiroInput.files[0] || !ficheiroInput.files[0].type.startsWith('image/')) {
-                    form.dataset.ficheiroPrepared = '1';
-                    return;
-                }
-
-                event.preventDefault();
-                var button = form.querySelector('button[type="submit"]');
-                if (button) {
-                    button.disabled = true;
-                    button.textContent = 'A preparar foto...';
-                }
-
-                prepareInvoiceImage(ficheiroInput.files[0]).then(function (preparedFile) {
-                    if (preparedFile && typeof DataTransfer !== 'undefined') {
-                        var dataTransfer = new DataTransfer();
-                        dataTransfer.items.add(preparedFile);
-                        ficheiroInput.files = dataTransfer.files;
-                    }
-                }).finally(function () {
-                    form.dataset.ficheiroPrepared = '1';
-                    if (typeof form.requestSubmit === 'function') {
-                        form.requestSubmit(button || undefined);
-                    } else {
-                        form.submit();
-                    }
-                });
-            });
-        }
-    }
-
-    function prepareInvoiceImage(file) {
-        if (!compressibleTypes.includes(file.type) || file.size < 1024 * 1024) {
-            return Promise.resolve(file);
-        }
-
-        return new Promise(function (resolve, reject) {
+        try {
             var reader = new FileReader();
-
-            reader.onerror = function () {
-                reject(new Error('Nao foi possivel ler a imagem.'));
-            };
-
-            reader.onload = function (event) {
+            reader.onload = function (e) {
                 var img = new Image();
-
-                img.onerror = function () {
-                    reject(new Error('Nao foi possivel preparar a imagem.'));
-                };
-
                 img.onload = function () {
-                    var scale = Math.min(1, maxUploadSide / Math.max(img.width, img.height));
-                    var canvas = document.createElement('canvas');
-                    canvas.width = Math.max(1, Math.round(img.width * scale));
-                    canvas.height = Math.max(1, Math.round(img.height * scale));
-
-                    var ctx = canvas.getContext('2d');
-                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-                    canvas.toBlob(function (blob) {
-                        if (!blob) {
-                            reject(new Error('Nao foi possivel comprimir a imagem.'));
-                            return;
+                    try {
+                        var escala = Math.min(1, MAX_QR_SIDE / Math.max(img.width, img.height));
+                        var canvas = document.createElement('canvas');
+                        canvas.width = Math.max(1, Math.round(img.width * escala));
+                        canvas.height = Math.max(1, Math.round(img.height * escala));
+                        var ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                        var code = jsQR(imageData.data, imageData.width, imageData.height);
+                        if (code && code.data && code.data.indexOf('A:') === 0) {
+                            preencherComQr(parseAtQr(code.data));
+                            if (qrBanner) qrBanner.classList.remove('hidden');
+                            mostrarStatus('QR AT lido: cabecalho preenchido. Carregue em "Ler fatura com IA" para trazer as linhas dos produtos.');
                         }
-
-                        if (blob.size >= file.size) {
-                            resolve(file);
-                            return;
-                        }
-
-                        resolve(new File([blob], file.name.replace(/\.(png|webp)$/i, '.jpg'), {
-                            type: 'image/jpeg',
-                            lastModified: Date.now()
-                        }));
-                    }, 'image/jpeg', jpegQuality);
+                    } catch (e) {
+                        // sem QR, segue-se em frente
+                    }
                 };
-
-                img.src = event.target.result;
+                img.src = e.target.result;
             };
-
             reader.readAsDataURL(file);
-        });
+        } catch (e) {
+            // sem QR, segue-se em frente
+        }
     }
 
-    var qrDispensar = document.getElementById('qr-dispensar');
-    if (qrDispensar) {
-        qrDispensar.addEventListener('click', function () {
-            document.getElementById('qr-banner').classList.add('hidden');
-            qrData = null;
-        });
-    }
-
-    // -- Item rows --
-    var itemsContainer = document.getElementById('items-container');
-    var template = document.getElementById('item-template');
-    var totaisContainer = document.getElementById('totais-container');
-    var valorManualContainer = document.getElementById('valor-manual-container');
-    var idx = 0;
+    // ------------------------------------------------------- linhas da fatura
 
     function formatEur(val) {
         return val.toFixed(2).replace('.', ',') + ' EUR';
@@ -426,16 +359,22 @@
             var unidades = parseFloat(row.querySelector('.item-unidades').value) || 0;
             var lineSemIva = qtd * preco;
             var lineIva = lineSemIva * (iva / 100);
-            var lineTotal = lineSemIva + lineIva;
-            var custoUnidade = unidades > 0 ? lineSemIva / unidades : 0;
-            row.querySelector('.item-custo-unidade').textContent = formatEur(custoUnidade);
-            row.querySelector('.item-total').textContent = formatEur(lineTotal);
+            row.querySelector('.item-custo-unidade').textContent = formatEur(unidades > 0 ? lineSemIva / unidades : 0);
+            row.querySelector('.item-total').textContent = formatEur(lineSemIva + lineIva);
             subtotal += lineSemIva;
             ivaTotal += lineIva;
         });
         document.getElementById('total-sem-iva').textContent = formatEur(subtotal);
         document.getElementById('total-iva').textContent = formatEur(ivaTotal);
         document.getElementById('total-com-iva').textContent = formatEur(subtotal + ivaTotal);
+    }
+
+    function toggleValorManual() {
+        var hasItems = itemsContainer.querySelectorAll('.item-row').length > 0;
+        totaisContainer.classList.toggle('hidden', !hasItems);
+        valorManualContainer.classList.toggle('hidden', hasItems);
+        var campoValor = document.getElementById('campo-valor');
+        if (campoValor) campoValor.required = !hasItems;
     }
 
     function addRow(values) {
@@ -474,7 +413,6 @@
         row.querySelectorAll('.item-qtd, .item-fator').forEach(function (input) {
             input.addEventListener('input', recalcularUnidades);
         });
-
         row.querySelectorAll('.item-unidades, .item-preco, .item-iva').forEach(function (input) {
             input.addEventListener('input', recalcularTotais);
         });
@@ -484,19 +422,204 @@
         toggleValorManual();
     }
 
-    function toggleValorManual() {
-        var hasItems = itemsContainer.querySelectorAll('.item-row').length > 0;
-        totaisContainer.classList.toggle('hidden', !hasItems);
-        valorManualContainer.classList.toggle('hidden', hasItems);
-        var campoValor = document.getElementById('campo-valor');
-        if (campoValor) campoValor.required = !hasItems;
-    }
-
     document.getElementById('btn-add-item').addEventListener('click', function () {
         addRow(null);
     });
 
-    // Pre-popular linhas existentes (editar)
+    // ------------------------------------------------------------ extracao IA
+
+    function setIfPresent(id, valor) {
+        var campo = document.getElementById(id);
+        if (campo && valor !== null && valor !== undefined && String(valor).trim() !== '' && String(valor) !== '0') {
+            campo.value = valor;
+        }
+    }
+
+    function preencherComIa(data) {
+        if (!data) return;
+
+        var titulo = document.getElementById('campo-titulo');
+        if (titulo && !titulo.value) setIfPresent('campo-titulo', data.titulo);
+        setIfPresent('campo-numero-fatura', data.numero_fatura);
+        setIfPresent('campo-fornecedor', data.fornecedor);
+        setIfPresent('campo-data', data.data);
+
+        if (Array.isArray(data.items) && data.items.length > 0) {
+            itemsContainer.querySelectorAll('.item-row').forEach(function (row) { row.remove(); });
+            data.items.forEach(function (item) {
+                addRow({
+                    descricao: item.descricao || '',
+                    quantidade: normalizarNumero(item.quantidade || 1),
+                    unidade_compra: item.unidade_compra || 'un',
+                    unidades_por_quantidade: normalizarNumero(item.unidades_por_quantidade || 1),
+                    quantidade_unidades: normalizarNumero(item.quantidade_unidades || item.quantidade || 1),
+                    preco_unitario: normalizarNumero(item.preco_unitario || 0),
+                    iva_percentagem: item.iva_percentagem || 23,
+                    notas: item.notas || ''
+                });
+            });
+            mostrarStatus('IA leu ' + data.items.length + ' linha(s). Confirme os valores e guarde.');
+        } else {
+            setIfPresent('campo-valor', data.valor);
+            mostrarStatus('A IA leu o cabecalho mas nao encontrou linhas de produtos. Adicione-as a mao.');
+        }
+
+        toggleValorManual();
+    }
+
+    if (btnIa) {
+        btnIa.addEventListener('click', function () {
+            var file = ficheiroAtual();
+
+            if (!file) {
+                mostrarStatus('Escolha ou tire uma foto da fatura primeiro.');
+                return;
+            }
+            if (file.type.indexOf('image/') !== 0) {
+                mostrarStatus('A leitura por IA aceita imagens (JPG, PNG ou WEBP). Para PDF, tire uma foto da fatura.');
+                return;
+            }
+
+            var tokenInput = form ? form.querySelector('input[name="_token"]') : null;
+            if (!tokenInput) {
+                mostrarStatus('Sessao expirada. Recarregue a pagina e tente de novo.');
+                return;
+            }
+
+            btnIa.disabled = true;
+            btnIa.textContent = 'A preparar foto...';
+            mostrarStatus('A preparar a foto para a IA...');
+
+            reduzirImagem(file, MAX_IA_SIDE)
+                .then(function (ficheiroIa) {
+                    var formData = new FormData();
+                    formData.append('ficheiro', ficheiroIa, 'fatura-ia.jpg');
+                    btnIa.textContent = 'A ler fatura...';
+                    mostrarStatus('A IA esta a ler a fatura. Pode demorar cerca de meio minuto...');
+
+                    return fetch(@json(route('despesas.extrair-ia')), {
+                        method: 'POST',
+                        headers: {
+                            'X-CSRF-TOKEN': tokenInput.value,
+                            'Accept': 'application/json'
+                        },
+                        credentials: 'same-origin',
+                        body: formData
+                    });
+                })
+                .then(function (response) {
+                    return response.text().then(function (text) {
+                        var body = {};
+                        try {
+                            body = text ? JSON.parse(text) : {};
+                        } catch (e) {
+                            if (!response.ok) {
+                                throw new Error('O servidor nao devolveu uma resposta valida. Confirme que a sessao esta iniciada e tente de novo.');
+                            }
+                        }
+                        if (!response.ok) {
+                            var erroValidacao = body.errors ? Object.keys(body.errors).map(function (k) { return body.errors[k].join(' '); }).join(' ') : null;
+                            throw new Error(body.message || erroValidacao || 'Nao foi possivel ler a fatura.');
+                        }
+                        return body;
+                    });
+                })
+                .then(preencherComIa)
+                .catch(function (error) {
+                    mostrarStatus(error && error.message ? error.message : 'Nao foi possivel ler a fatura com IA.');
+                })
+                .then(function () {
+                    btnIa.disabled = false;
+                    btnIa.textContent = 'Ler fatura com IA';
+                });
+        });
+    }
+
+    // ------------------------------------------------------- input do ficheiro
+
+    if (fileInput) {
+        fileInput.addEventListener('change', function () {
+            if (qrBanner) qrBanner.classList.add('hidden');
+            preparacao = null;
+            preparacaoPendente = false;
+
+            var file = ficheiroAtual();
+            if (!file) {
+                esconderStatus();
+                return;
+            }
+
+            if (file.type.indexOf('image/') !== 0) {
+                mostrarStatus('Ficheiro selecionado. Ao guardar fica anexado a esta entrada.');
+                return;
+            }
+
+            mostrarStatus('A preparar a foto...');
+            preparacaoPendente = true;
+
+            preparacao = reduzirImagem(file, MAX_UPLOAD_SIDE).then(function (preparado) {
+                preparacaoPendente = false;
+                try {
+                    substituirFicheiro(preparado);
+                    mostrarStatus('Foto pronta. Carregue em "Ler fatura com IA" para preencher as linhas, ou guarde ja.');
+                    lerQr(ficheiroAtual() || preparado);
+                } catch (e) {
+                    // nada a fazer: o ficheiro original segue no formulario
+                }
+                return preparado;
+            }, function () {
+                preparacaoPendente = false;
+            });
+        });
+    }
+
+    // ------------------------------------------------------------ submissao
+    // Nunca bloquear o Guardar: se a preparacao da foto ainda estiver a
+    // decorrer espera-se no maximo ESPERA_MAX_SUBMIT e submete-se na mesma.
+    function marcarAGuardar() {
+        var botao = form ? form.querySelector('button[type="submit"]') : null;
+        if (!botao || botao.dataset.aGuardar === '1') return;
+        botao.dataset.aGuardar = '1';
+        botao.textContent = 'A guardar...';
+        botao.style.opacity = '0.7';
+        botao.style.pointerEvents = 'none';
+    }
+
+    if (form) {
+        // O evento submit so dispara depois da validacao do browser passar,
+        // por isso e seguro marcar o botao aqui.
+        form.addEventListener('submit', function (event) {
+            if (aEnviar || !preparacaoPendente || !preparacao) {
+                marcarAGuardar();
+                return;
+            }
+
+            event.preventDefault();
+
+            var botao = form.querySelector('button[type="submit"]');
+            var textoOriginal = botao ? botao.textContent : null;
+            if (botao) botao.textContent = 'A preparar foto...';
+
+            var enviado = false;
+            function enviar() {
+                if (enviado) return;
+                enviado = true;
+                aEnviar = true;
+                if (botao && textoOriginal !== null) botao.textContent = textoOriginal;
+                if (typeof form.requestSubmit === 'function') {
+                    form.requestSubmit();
+                } else {
+                    form.submit();
+                }
+            }
+
+            setTimeout(enviar, ESPERA_MAX_SUBMIT);
+            Promise.resolve(preparacao).then(enviar, enviar);
+        });
+    }
+
+    // -------------------------------------------------- linhas ja existentes
+
     var existing = @json($existingItems);
     existing.forEach(function (item) {
         addRow(item);

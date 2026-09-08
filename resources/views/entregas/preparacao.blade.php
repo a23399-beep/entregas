@@ -50,7 +50,7 @@
         <div class="mb-4 rounded border border-amber-400/30 bg-[#F59E0B]/10 px-4 py-3 text-sm text-amber-100">
             Escondidas
             @if($escondidasSemColaborador > 0)
-                <strong>{{ $escondidasSemColaborador }}</strong> entrega(s) sem colaborador atribuido
+                <strong>{{ $escondidasSemColaborador }}</strong> entrega(s) de empresas sem colaborador atribuido
             @endif
             @if($escondidasSemColaborador > 0 && $escondidasNaoEntregues > 0) e @endif
             @if($escondidasNaoEntregues > 0)

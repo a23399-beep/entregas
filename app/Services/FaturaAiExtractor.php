@@ -8,7 +8,7 @@ use RuntimeException;
 
 class FaturaAiExtractor
 {
-    public function extract(UploadedFile $file): array
+    public function extract(UploadedFile $file, int $timeout = 90): array
     {
         $apiKey = config('services.openai.api_key');
 
@@ -20,7 +20,7 @@ class FaturaAiExtractor
         $imageData = 'data:'.$mime.';base64,'.base64_encode(file_get_contents($file->getRealPath()));
 
         $response = Http::withToken($apiKey)
-            ->timeout(90)
+            ->timeout($timeout)
             ->acceptJson()
             ->post('https://api.openai.com/v1/responses', [
                 'model' => config('services.openai.model', 'gpt-5.5'),

@@ -4,14 +4,20 @@ namespace App\Http\Controllers;
 
 use App\Models\AiJob;
 use App\Models\Despesa;
+use App\Services\FaturaAiExtractor;
 use Barryvdh\DomPDF\Facade\Pdf;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\View\View;
+use RuntimeException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
+use Throwable;
 
 class DespesaController extends Controller
 {
@@ -95,6 +101,35 @@ class DespesaController extends Controller
         ]);
     }
 
+    public function extrairIa(Request $request, FaturaAiExtractor $extractor): JsonResponse
+    {
+        abort_unless(auth()->user()->isAdmin(), 403);
+
+        $data = $request->validate([
+            'ficheiro' => ['required', 'file', 'max:20480', 'mimes:jpg,jpeg,png,webp'],
+        ], [
+            'ficheiro.required' => 'Escolha ou tire uma foto da fatura.',
+            'ficheiro.uploaded' => 'A foto nao conseguiu chegar ao servidor. Confirme upload_max_filesize, post_max_size e client_max_body_size.',
+            'ficheiro.max' => 'A foto e demasiado grande. Tente novamente com uma foto mais leve.',
+            'ficheiro.mimes' => 'A leitura por IA aceita JPG, PNG ou WEBP.',
+        ]);
+
+        try {
+            $extraido = $extractor->extract($data['ficheiro']);
+            $extraido['items'] = $this->normalizarItensIa($extraido['items'] ?? []);
+
+            return response()->json($extraido);
+        } catch (RuntimeException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 422);
+        } catch (Throwable $exception) {
+            Log::error('Erro ao ler fatura com IA', ['message' => $exception->getMessage()]);
+
+            return response()->json([
+                'message' => 'Nao foi possivel ler a fatura com IA. Confirme a chave da OpenAI e tente novamente.',
+            ], 500);
+        }
+    }
+
     public function store(Request $request): RedirectResponse
     {
         abort_unless(auth()->user()->isAdmin(), 403);
@@ -120,10 +155,22 @@ class DespesaController extends Controller
 
         $ficheiroPath = null;
         $ficheiroIsImage = false;
+        $itensIa = [];
+
         if ($request->hasFile('ficheiro')) {
             $file = $request->file('ficheiro');
-            $ficheiroPath = $file->store('despesas', 'public');
             $ficheiroIsImage = str_starts_with($file->getMimeType() ?? '', 'image/');
+
+            // Foto sem linhas preenchidas a mao: tenta ler a fatura logo aqui.
+            if ($ficheiroIsImage && empty($data['items'])) {
+                $itensIa = $this->lerItensComIa($file);
+            }
+
+            $ficheiroPath = $file->store('despesas', 'public');
+        }
+
+        if ($itensIa !== []) {
+            $data['items'] = $itensIa;
         }
 
         $despesa = DB::transaction(function () use ($data, $ficheiroPath): Despesa {
@@ -161,9 +208,11 @@ class DespesaController extends Controller
 
         $message = 'Entrada registada com sucesso.';
 
-        if ($ficheiroPath && $ficheiroIsImage) {
+        if ($itensIa !== []) {
+            $message = 'Entrada registada. A IA leu '.count($itensIa).' linha(s) da fatura - confirme os valores.';
+        } elseif ($ficheiroPath && $ficheiroIsImage) {
             $this->queueAiJob($despesa, $ficheiroPath);
-            $message = 'Foto recebida. A IA em casa vai processar esta fatura dentro de cerca de 1 minuto.';
+            $message = 'Entrada registada. Nao consegui ler a fatura na hora; a IA em casa vai tentar dentro de cerca de 1 minuto.';
         }
 
         return redirect()->route('despesas.index')->with('status', $message);
@@ -206,13 +255,25 @@ class DespesaController extends Controller
 
         $ficheiroPath = $despesa->ficheiro_path;
         $ficheiroIsNewImage = false;
+        $itensIa = [];
+
         if ($request->hasFile('ficheiro')) {
             if ($ficheiroPath) {
                 Storage::disk('public')->delete($ficheiroPath);
             }
+
             $file = $request->file('ficheiro');
-            $ficheiroPath = $file->store('despesas', 'public');
             $ficheiroIsNewImage = str_starts_with($file->getMimeType() ?? '', 'image/');
+
+            if ($ficheiroIsNewImage && empty($data['items'])) {
+                $itensIa = $this->lerItensComIa($file);
+            }
+
+            $ficheiroPath = $file->store('despesas', 'public');
+        }
+
+        if ($itensIa !== []) {
+            $data['items'] = $itensIa;
         }
 
         DB::transaction(function () use ($data, $ficheiroPath, $despesa): void {
@@ -250,9 +311,11 @@ class DespesaController extends Controller
 
         $message = 'Entrada atualizada com sucesso.';
 
-        if ($ficheiroPath && $ficheiroIsNewImage) {
+        if ($itensIa !== []) {
+            $message = 'Entrada atualizada. A IA leu '.count($itensIa).' linha(s) da fatura - confirme os valores.';
+        } elseif ($ficheiroPath && $ficheiroIsNewImage) {
             $this->queueAiJob($despesa, $ficheiroPath);
-            $message = 'Foto recebida. A IA em casa vai voltar a processar esta fatura dentro de cerca de 1 minuto.';
+            $message = 'Entrada atualizada. Nao consegui ler a fatura na hora; a IA em casa vai tentar dentro de cerca de 1 minuto.';
         }
 
         return redirect()->route('despesas.index')->with('status', $message);
@@ -375,6 +438,73 @@ class DespesaController extends Controller
         }, $filename, [
             'Content-Type' => 'text/csv; charset=UTF-8',
         ]);
+    }
+
+    /**
+     * Le as linhas da fatura com a IA. Nunca rebenta o guardar: se falhar
+     * devolve um array vazio e a entrada e gravada na mesma.
+     */
+    private function lerItensComIa(UploadedFile $file): array
+    {
+        if (! config('services.openai.auto_despesas', true)) {
+            return [];
+        }
+
+        try {
+            $dados = app(FaturaAiExtractor::class)->extract($file, 40);
+
+            return $this->normalizarItensIa($dados['items'] ?? []);
+        } catch (Throwable $exception) {
+            Log::warning('Leitura automatica da fatura por IA falhou', [
+                'message' => $exception->getMessage(),
+            ]);
+
+            return [];
+        }
+    }
+
+    private function normalizarItensIa(array $items): array
+    {
+        $normalizados = [];
+
+        foreach ($items as $item) {
+            if (! is_array($item)) {
+                continue;
+            }
+
+            $descricao = trim((string) ($item['descricao'] ?? ''));
+
+            if ($descricao === '') {
+                continue;
+            }
+
+            $quantidade = (float) ($item['quantidade'] ?? 1);
+            $quantidade = $quantidade > 0 ? $quantidade : 1;
+
+            $fator = (float) ($item['unidades_por_quantidade'] ?? 1);
+            $fator = $fator > 0 ? $fator : 1;
+
+            $unidades = (float) ($item['quantidade_unidades'] ?? 0);
+            $unidades = $unidades > 0 ? $unidades : $quantidade * $fator;
+
+            $iva = (float) ($item['iva_percentagem'] ?? 23);
+            $iva = in_array($iva, self::TAXAS_IVA) ? $iva : 23;
+
+            $unidade = trim((string) ($item['unidade_compra'] ?? 'un'));
+
+            $normalizados[] = [
+                'descricao' => mb_substr($descricao, 0, 255),
+                'quantidade' => round($quantidade, 3),
+                'unidade_compra' => $unidade !== '' ? mb_substr($unidade, 0, 20) : 'un',
+                'unidades_por_quantidade' => round($fator, 3),
+                'quantidade_unidades' => round($unidades, 3),
+                'preco_unitario' => round(max(0, (float) ($item['preco_unitario'] ?? 0)), 4),
+                'iva_percentagem' => $iva,
+                'notas' => trim((string) ($item['notas'] ?? '')),
+            ];
+        }
+
+        return $normalizados;
     }
 
     private function queueAiJob(Despesa $despesa, string $ficheiroPath): void
