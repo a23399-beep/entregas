@@ -28,7 +28,7 @@
             </button>
         </div>
 
-        <p class="mt-1 text-xs text-slate-500">No telemovel, escolha a camara neste campo. Depois carregue em "Ler fatura com IA" para preencher as linhas. Se guardar sem o fazer, a leitura corre no servidor e o guardar pode demorar ate meio minuto.</p>
+        <p class="mt-1 text-xs text-slate-500">Aceita foto (JPG, PNG, WEBP) ou PDF. No telemovel, escolha a camara neste campo. Depois carregue em "Ler fatura com IA" para preencher as linhas. Se guardar sem o fazer, a leitura corre no servidor e o guardar pode demorar ate meio minuto.</p>
         <p id="ficheiro-status" class="mt-2 hidden rounded border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200"></p>
 
         @if($despesa->exists && $despesa->ficheiro_path)
@@ -475,8 +475,10 @@
                 mostrarStatus('Escolha ou tire uma foto da fatura primeiro.');
                 return;
             }
-            if (file.type.indexOf('image/') !== 0) {
-                mostrarStatus('A leitura por IA aceita imagens (JPG, PNG ou WEBP). Para PDF, tire uma foto da fatura.');
+            var ehPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+
+            if (file.type.indexOf('image/') !== 0 && !ehPdf) {
+                mostrarStatus('A leitura por IA aceita fotos (JPG, PNG, WEBP) ou PDF.');
                 return;
             }
 
@@ -487,13 +489,13 @@
             }
 
             btnIa.disabled = true;
-            btnIa.textContent = 'A preparar foto...';
-            mostrarStatus('A preparar a foto para a IA...');
+            btnIa.textContent = ehPdf ? 'A enviar PDF...' : 'A preparar foto...';
+            mostrarStatus(ehPdf ? 'A enviar o PDF para a IA...' : 'A preparar a foto para a IA...');
 
             reduzirImagem(file, MAX_IA_SIDE)
                 .then(function (ficheiroIa) {
                     var formData = new FormData();
-                    formData.append('ficheiro', ficheiroIa, 'fatura-ia.jpg');
+                    formData.append('ficheiro', ficheiroIa, ehPdf ? (file.name || 'fatura.pdf') : 'fatura-ia.jpg');
                     btnIa.textContent = 'A ler fatura...';
                     mostrarStatus('A IA esta a ler a fatura. Pode demorar cerca de meio minuto...');
 
@@ -550,7 +552,7 @@
             }
 
             if (file.type.indexOf('image/') !== 0) {
-                mostrarStatus('Ficheiro selecionado. Ao guardar fica anexado a esta entrada.');
+                mostrarStatus('Ficheiro selecionado. Carregue em "Ler fatura com IA" para preencher as linhas, ou guarde já.');
                 return;
             }
 

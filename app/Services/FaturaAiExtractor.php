@@ -17,7 +17,27 @@ class FaturaAiExtractor
         }
 
         $mime = $file->getMimeType() ?: 'image/jpeg';
-        $imageData = 'data:'.$mime.';base64,'.base64_encode(file_get_contents($file->getRealPath()));
+        $base64 = base64_encode(file_get_contents($file->getRealPath()));
+
+        $conteudo = [[
+            'type' => 'input_text',
+            'text' => $this->prompt(),
+        ]];
+
+        if ($this->ehPdf($file, $mime)) {
+            // A Responses API le PDFs directamente (texto + imagem de cada pagina).
+            $conteudo[] = [
+                'type' => 'input_file',
+                'filename' => $this->nomePdf($file),
+                'file_data' => 'data:application/pdf;base64,'.$base64,
+            ];
+        } else {
+            $conteudo[] = [
+                'type' => 'input_image',
+                'image_url' => 'data:'.$mime.';base64,'.$base64,
+                'detail' => 'high',
+            ];
+        }
 
         $response = Http::withToken($apiKey)
             ->timeout($timeout)
@@ -26,17 +46,7 @@ class FaturaAiExtractor
                 'model' => config('services.openai.model', 'gpt-5.5'),
                 'input' => [[
                     'role' => 'user',
-                    'content' => [
-                        [
-                            'type' => 'input_text',
-                            'text' => $this->prompt(),
-                        ],
-                        [
-                            'type' => 'input_image',
-                            'image_url' => $imageData,
-                            'detail' => 'high',
-                        ],
-                    ],
+                    'content' => $conteudo,
                 ]],
                 'text' => [
                     'format' => [
@@ -60,6 +70,19 @@ class FaturaAiExtractor
         }
 
         return $data;
+    }
+
+    private function ehPdf(UploadedFile $file, string $mime): bool
+    {
+        return $mime === 'application/pdf'
+            || strtolower((string) $file->getClientOriginalExtension()) === 'pdf';
+    }
+
+    private function nomePdf(UploadedFile $file): string
+    {
+        $nome = (string) ($file->getClientOriginalName() ?: '');
+
+        return str_ends_with(strtolower($nome), '.pdf') ? $nome : 'fatura.pdf';
     }
 
     private function prompt(): string

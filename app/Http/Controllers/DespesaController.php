@@ -106,12 +106,12 @@ class DespesaController extends Controller
         abort_unless(auth()->user()->isAdmin(), 403);
 
         $data = $request->validate([
-            'ficheiro' => ['required', 'file', 'max:20480', 'mimes:jpg,jpeg,png,webp'],
+            'ficheiro' => ['required', 'file', 'max:20480', 'mimes:jpg,jpeg,png,webp,pdf'],
         ], [
-            'ficheiro.required' => 'Escolha ou tire uma foto da fatura.',
-            'ficheiro.uploaded' => 'A foto nao conseguiu chegar ao servidor. Confirme upload_max_filesize, post_max_size e client_max_body_size.',
-            'ficheiro.max' => 'A foto e demasiado grande. Tente novamente com uma foto mais leve.',
-            'ficheiro.mimes' => 'A leitura por IA aceita JPG, PNG ou WEBP.',
+            'ficheiro.required' => 'Escolha uma foto ou um PDF da fatura.',
+            'ficheiro.uploaded' => 'O ficheiro nao conseguiu chegar ao servidor. Confirme upload_max_filesize, post_max_size e client_max_body_size.',
+            'ficheiro.max' => 'O ficheiro e demasiado grande. Tente novamente com uma foto mais leve.',
+            'ficheiro.mimes' => 'A leitura por IA aceita JPG, PNG, WEBP ou PDF.',
         ]);
 
         try {
@@ -161,8 +161,8 @@ class DespesaController extends Controller
             $file = $request->file('ficheiro');
             $ficheiroIsImage = str_starts_with($file->getMimeType() ?? '', 'image/');
 
-            // Foto sem linhas preenchidas a mao: tenta ler a fatura logo aqui.
-            if ($ficheiroIsImage && empty($data['items'])) {
+            // Foto ou PDF sem linhas preenchidas a mao: tenta ler a fatura logo aqui.
+            if ($this->podeLerComIa($file) && empty($data['items'])) {
                 $itensIa = $this->lerItensComIa($file);
             }
 
@@ -265,7 +265,7 @@ class DespesaController extends Controller
             $file = $request->file('ficheiro');
             $ficheiroIsNewImage = str_starts_with($file->getMimeType() ?? '', 'image/');
 
-            if ($ficheiroIsNewImage && empty($data['items'])) {
+            if ($this->podeLerComIa($file) && empty($data['items'])) {
                 $itensIa = $this->lerItensComIa($file);
             }
 
@@ -438,6 +438,15 @@ class DespesaController extends Controller
         }, $filename, [
             'Content-Type' => 'text/csv; charset=UTF-8',
         ]);
+    }
+
+    private function podeLerComIa(UploadedFile $file): bool
+    {
+        $mime = (string) ($file->getMimeType() ?? '');
+
+        return str_starts_with($mime, 'image/')
+            || $mime === 'application/pdf'
+            || strtolower((string) $file->getClientOriginalExtension()) === 'pdf';
     }
 
     /**
